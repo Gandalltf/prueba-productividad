@@ -295,12 +295,18 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
 
         filas = []
         for d in wdays:
-            if d['fichaje'] > 0 or d['productividad'] > 0 or d['notas']:
-                filas.append(
-                    f"<tr><td>{d['dia']}</td><td>{d['fecha']}</td><td>{d['fichaje']}</td>"
-                    f"<td>{d['productividad']}</td><td>{d['ajuste_desde_productividad']}</td>"
-                    f"<td>{d['notas']}</td></tr>"
-                )
+            # Añadimos TODOS los días, aunque tengan 0 horas
+            filas.append(
+                f"<tr>"
+                f"<td>{d['dia']}</td>"
+                f"<td>{d['fecha']}</td>"
+                f"<td>{d['fichaje']}</td>"
+                f"<td>{d['productividad']}</td>"
+                f"<td>{d['ajuste_desde_productividad']}</td>"
+                f"<td>{d['notas']}</td>"
+                f"</tr>"
+            )
+
 
         html = f"""
         <div style="font-family:Segoe UI,Arial,sans-serif;font-size:13px">
