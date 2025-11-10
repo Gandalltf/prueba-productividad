@@ -20,7 +20,6 @@ MONTH = {
     7: 'Julio', 8: 'Agosto', 9: 'Septiembre', 10: 'Octubre', 11: 'Noviembre', 12: 'Diciembre'
 }
 
-
 def _h(v):
     if v is None:
         return 0.0
@@ -30,7 +29,6 @@ def _h(v):
         return float(str(v).replace(',', '.'))
     except Exception:
         return 0.0
-
 
 def _dt(s):
     if isinstance(s, datetime):
@@ -45,7 +43,6 @@ def _dt(s):
             pass
     return datetime.fromisoformat(s)
 
-
 def local_date(x, tz='Europe/Madrid'):
     z = ZoneInfo(tz)
     dt = _dt(x)
@@ -53,24 +50,18 @@ def local_date(x, tz='Europe/Madrid'):
         dt = dt.replace(tzinfo=ZoneInfo('UTC'))
     return dt.astimezone(z).date()
 
-
 def dr(a: date, b: date):
     d = a
     while d <= b:
         yield d
         d += timedelta(days=1)
 
-
 def wb(d: date):
     s = d - timedelta(days=d.weekday())
     e = s + timedelta(days=6)
     return s, e
 
-
 def in_period(d, periods):
-    """
-    True si la fecha d está en alguno de los periodos flexibles (ignorando el año).
-    """
     if not periods:
         return False
     for p in periods:
@@ -79,11 +70,9 @@ def in_period(d, periods):
             e = _dt(p['end']).date()
         except Exception:
             continue
-
         d_md = (d.month, d.day)
         s_md = (s.month, s.day)
         e_md = (e.month, e.day)
-
         if s_md <= e_md:
             if s_md <= d_md <= e_md:
                 return True
@@ -92,15 +81,17 @@ def in_period(d, periods):
                 return True
     return False
 
-
 def r2(x):
     return math.floor(x * 100 + 0.5) / 100.0
 
-
-def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=None,
-            flexible_rest_periods=None, enforce_sunday_rest=True):
-
-    # Periodo flexible por defecto si no se pasa desde fuera
+def process(
+    records, start_date, end_date, tz='Europe/Madrid', selected_worker=None,
+    flexible_rest_periods=None, enforce_sunday_rest=True,
+    company_name='nombre de empresa ejemplo',
+    company_tax_id='un número ejemplo',
+    company_site='un centro de ejemplo'
+):
+    # Periodo flexible por defecto (15-feb → 15-jun) si no se pasa desde fuera
     if not flexible_rest_periods:
         flexible_rest_periods = [{'start': '2000-02-15', 'end': '2000-06-15'}]
     elif isinstance(flexible_rest_periods, dict):
@@ -158,7 +149,7 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
                 'fichaje': 0.0,
                 'prod': 0.0,
                 'aj': 0.0,            # horas movidas desde productividad
-                'orig_fichaje': 0.0,  # fichaje real de entrada (antes de ajustes)
+                'orig_fichaje': 0.0,  # fichaje real de entrada
                 'nota': [],
                 'dia': DOW[d.weekday()],
                 'fecha': d.isoformat()
@@ -166,7 +157,7 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
             for d in dr(start, end)
         }
 
-        # Cargar fichaje y productividad (y guardar fichaje original)
+        # Cargar datos
         for it in items:
             d = it['fecha']
             if it['categoria'] == 'FICHAJE':
@@ -175,7 +166,7 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
             else:
                 days[d]['prod'] += it['horas']
 
-        # Pool de productividad (lo que podemos ir gastando)
+        # Pool de productividad
         pool = {d: r2(v['prod']) for d, v in days.items()}
 
         def take(amt, prefer=None):
@@ -212,12 +203,7 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
             if got > 0:
                 days[d]['fichaje'] = r2(days[d]['fichaje'] + got)
                 days[d]['aj'] = r2(days[d]['aj'] + got)
-                transfers.append({
-                    'to': d.isoformat(),
-                    'hours': got,
-                    'from_parts': logs,
-                    'reason': 'Topup <7h'
-                })
+                transfers.append({'to': d.isoformat(), 'hours': got, 'from_parts': logs, 'reason': 'Topup <7h'})
 
         # 2) Completar hasta 6 días/semana con 7h (si hay productividad suficiente)
         seen = set()
@@ -234,14 +220,12 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
                 continue
 
             flex = any(in_period(d, flexible_rest_periods) for d in semana_dias)
-
             worked_total = [d for d in semana_dias if r2(days[d]['fichaje']) > 0]  # cuenta todo (incl. domingo)
             if len(worked_total) >= 6:
                 continue
 
             need = 6 - len(worked_total)
 
-            # Candidatos para generar un día nuevo (no domingo fuera de flexible)
             cand = [
                 d for d in semana_dias
                 if r2(days[d]['fichaje']) == 0
@@ -259,18 +243,10 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
                     days[d]['fichaje'] = r2(days[d]['fichaje'] + got)
                     days[d]['aj'] = r2(days[d]['aj'] + got)
                     days[d]['nota'].append('Día generado para completar 6 días de trabajo')
-                    transfers.append({
-                        'to': d.isoformat(),
-                        'hours': got,
-                        'from_parts': logs,
-                        'reason': 'Completar 6 días'
-                    })
+                    transfers.append({'to': d.isoformat(), 'hours': got, 'from_parts': logs, 'reason': 'Completar 6 días'})
                     need -= 1
 
-        # 3) Cinturón de seguridad: máx. 6 días trabajados/semana
-        #    - Nunca liberar un día con fichaje real (orig_fichaje>0).
-        #    - En flexible: liberar primero días generados (orig_fichaje==0 y aj>0) y devolver su aj al pool.
-        #    - Fuera de flexible: descanso en domingo solo si el domingo es generado; si el domingo es real, dejar aviso.
+        # 3) Cinturón de seguridad: máx. 6 días trabajados/semana (sin tocar fichajes reales)
         seen_cap = set()
         for dref in sorted(days.keys()):
             w = wb(dref)
@@ -284,30 +260,22 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
 
             flex = any(in_period(x, flexible_rest_periods) for x in semana)
             worked = [x for x in semana if r2(days[x]['fichaje']) > 0]
-
             if len(worked) <= 6:
                 continue
 
             domingo = next((x for x in semana if x.weekday() == 6), None)
-            # Días generados (trabajados pero sin fichaje real de entrada)
             generados = [x for x in worked if r2(days[x]['orig_fichaje']) == 0 and r2(days[x]['aj']) > 0]
 
             cand = None
             if not flex:
-                # Fuera flexible: intentar liberar domingo SOLO si es generado
                 if domingo and domingo in generados:
                     cand = domingo
                 else:
-                    # No es posible cumplir descanso en domingo sin tocar un fichaje real
-                    # Dejar aviso y no alterar totales
-                    # (Si hay 7 reales, se mantiene tal cual)
-                    continue
+                    continue  # no tocar días reales
             else:
-                # En flexible: liberar cualquier generado (prioriza el de menor aj)
                 if generados:
                     cand = min(generados, key=lambda x: (r2(days[x]['aj']), x))
                 else:
-                    # Todos los trabajados son reales; no podemos liberar sin tocar fichaje real
                     continue
 
             if cand is not None:
@@ -316,16 +284,15 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
                     pool[cand] = r2(pool.get(cand, 0.0) + aj)
                     days[cand]['aj'] = 0.0
                 days[cand]['nota'].append('Descanso semanal aplicado (día generado liberado)')
-                days[cand]['fichaje'] = 0.0  # Como era un día generado, volvemos a 0
+                days[cand]['fichaje'] = 0.0
 
-        # Preparar salida (tabla + HTML)
+        # Preparar salida y HTML
         tf = 0.0
         tp = 0.0
         avisos = []
         wdays = []
         for d in sorted(days.keys()):
             flex = in_period(d, flexible_rest_periods)
-            # Aviso si domingo con fichaje fuera de flexible (regla incumplible sin tocar datos reales)
             if enforce_sunday_rest and d.weekday() == 6 and not flex and r2(days[d]['fichaje']) > 0:
                 avisos.append(f'Domingo {d.isoformat()} con fichaje real fuera de periodo flexible (no se puede imponer descanso)')
             prod_final = r2(pool.get(d, 0.0))
@@ -341,7 +308,7 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
             tf += fich_final
             tp += prod_final
 
-        # --- HTML mejorado ---
+        # ---- HTML A4 ----
         def _fmt_es(fecha_iso: str) -> str:
             y, m, d = fecha_iso.split("-")
             return f"{d}/{m}/{y}"
@@ -353,48 +320,58 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
             is_sunday = (d['dia'] == 'Domingo')
             base_row_style = 'border-top:1px solid #f3f4f6;'
             zebra = ' background:#fcfcfd;' if (row_idx % 2 == 1) else ''
-            sunday_bg = ' background:#f5f6f7;' if is_sunday else zebra
-
+            sunday_bg = ' background:#f2f4f6;' if is_sunday else zebra
             filas.append(
                 f"<tr style=\"{base_row_style}{sunday_bg}\">"
-                f"<td style=\"padding:8px 10px;\">{fecha_es}</td>"
-                f"<td style=\"padding:8px 10px;\">{d['dia']}</td>"
-                f"<td style=\"padding:8px 10px; text-align:right;\"><strong>{d['fichaje']}</strong></td>"
-                f"<td style=\"padding:8px 10px; text-align:right; color:#6b7280;\">{d['productividad']}</td>"
-                f"<td style=\"padding:8px 10px; text-align:right;\">{d['ajuste_desde_productividad']}</td>"
-                f"<td style=\"padding:8px 10px;\">{d['notas']}</td>"
+                f"<td style=\"padding:6px 8px;\">{fecha_es}</td>"
+                f"<td style=\"padding:6px 8px;\">{d['dia']}</td>"
+                f"<td style=\"padding:6px 8px; text-align:right;\"><strong>{d['fichaje']}</strong></td>"
+                f"<td style=\"padding:6px 8px; text-align:right; color:#6b7280;\">{d['productividad']}</td>"
+                f"<td style=\"padding:6px 8px; text-align:right;\">{d['ajuste_desde_productividad']}</td>"
+                f"<td style=\"padding:6px 8px;\">{d['notas']}</td>"
                 f"</tr>"
             )
             row_idx += 1
 
         html = f"""
-<div class="registro-jornadas" style="font-family: Segoe UI, Arial, sans-serif; color:#111; font-size:13px; line-height:1.35;">
+<div class="registro-jornadas"
+     style="font-family: Segoe UI, Arial, sans-serif; color:#111; line-height:1.35;
+            width:190mm; margin:0 auto; padding:10mm; box-sizing:border-box; font-size:11.5px;">
   <!-- Encabezado -->
-  <div style="margin-bottom:14px;">
-    <div style="font-size:18px; font-weight:700; letter-spacing:0.5px;">REGISTRO DE JORNADAS</div>
-    <div style="margin-top:6px; color:#374151;">
-      <div><strong>EMPRESA:</strong> nombre de empresa ejemplo</div>
-      <div><strong>CIF/NIF:</strong> un número ejemplo</div>
-      <div><strong>Centro de trabajo:</strong> un centro de ejemplo</div>
+  <div style="margin-bottom:10px;">
+    <div style="font-size:18px; font-weight:700; letter-spacing:0.3px;">REGISTRO DE JORNADAS</div>
+    <div style="margin-top:6px; color:#374151; font-size:12.5px;">
+      <div><strong>EMPRESA:</strong> {company_name}</div>
+      <div><strong>CIF/NIF:</strong> {company_tax_id}</div>
+      <div><strong>Centro de trabajo:</strong> {company_site}</div>
     </div>
   </div>
 
   <!-- Identificación trabajador / periodo -->
-  <div style="margin: 8px 0 10px 0;">
-    <div style="font-weight:600; font-size:15px; margin-bottom:2px;">{worker}</div>
-    <div style="color:#4b5563;">Periodo: {MONTH[start.month]} {start.year}</div>
+  <div style="margin:6px 0 8px 0;">
+    <div style="font-weight:600; font-size:14px; margin-bottom:1px;">{worker}</div>
+    <div style="color:#4b5563; font-size:12.5px;">Periodo: {MONTH[start.month]} {start.year}</div>
   </div>
 
   <!-- Tabla -->
-  <table cellpadding="0" cellspacing="0" style="border-collapse:collapse; width:100%; border:1px solid #e5e7eb;">
+  <table cellpadding="0" cellspacing="0"
+         style="table-layout:fixed; border-collapse:collapse; width:100%; border:1px solid #e5e7eb;">
+    <colgroup>
+      <col style="width:16%;">
+      <col style="width:16%;">
+      <col style="width:13%;">
+      <col style="width:13%;">
+      <col style="width:13%;">
+      <col style="width:29%;">
+    </colgroup>
     <thead>
-      <tr style="background:#f9fafb; border-bottom:1px solid #e5e7eb; text-align:left;">
-        <th style="padding:8px 10px; font-weight:600;">Fecha</th>
-        <th style="padding:8px 10px; font-weight:600;">Día</th>
-        <th style="padding:8px 10px; font-weight:600; text-align:right;">Fichaje (h)</th>
-        <th style="padding:8px 10px; font-weight:600; text-align:right;">Productividad (h)</th>
-        <th style="padding:8px 10px; font-weight:600; text-align:right;">Transferido (h)</th>
-        <th style="padding:8px 10px; font-weight:600;">Notas</th>
+      <tr style="background:#f3f4f6; border-bottom:1px solid #e5e7eb; text-align:left;">
+        <th style="padding:6px 8px; font-weight:600;">Fecha</th>
+        <th style="padding:6px 8px; font-weight:600;">Día</th>
+        <th style="padding:6px 8px; font-weight:600; text-align:right;">Fichaje (h)</th>
+        <th style="padding:6px 8px; font-weight:600; text-align:right;">Productividad (h)</th>
+        <th style="padding:6px 8px; font-weight:600; text-align:right;">Transferido (h)</th>
+        <th style="padding:6px 8px; font-weight:600;">Notas</th>
       </tr>
     </thead>
     <tbody>
@@ -402,24 +379,24 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
     </tbody>
     <tfoot>
       <tr style="border-top:1px solid #e5e7eb; background:#fafafa;">
-        <td style="padding:10px;" colspan="2"><strong>Totales</strong></td>
-        <td style="padding:10px; text-align:right;"><strong>{r2(tf)}</strong></td>
-        <td style="padding:10px; text-align:right;"><strong>{r2(tp)}</strong></td>
-        <td style="padding:10px;"></td>
-        <td style="padding:10px;"></td>
+        <td style="padding:7px 8px;" colspan="2"><strong>Totales</strong></td>
+        <td style="padding:7px 8px; text-align:right;"><strong>{r2(tf)}</strong></td>
+        <td style="padding:7px 8px; text-align:right;"><strong>{r2(tp)}</strong></td>
+        <td style="padding:7px 8px;"></td>
+        <td style="padding:7px 8px;"></td>
       </tr>
     </tfoot>
   </table>
 
   <!-- Pie legal -->
-  <div style="margin-top:12px; color:#4b5563; font-size:12px;">
-    <div style="margin-bottom:6px;">
+  <div style="margin-top:10px; color:#4b5563; font-size:11.5px;">
+    <div style="margin-bottom:4px;">
       Registro basado en la obligación establecida en el art. 35.5 del Texto Refundido del Estatuto de Trabajadores (RDL 2/2015 de 23 de octubre).
     </div>
-    <div style="margin-bottom:10px;">
+    <div style="margin-bottom:8px;">
       <strong>NOTA:</strong> Cuando en las horas normales aparezcan 7 horas, hay que descontar media hora de descanso por comida de las personas trabajadoras.
     </div>
-    <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:10px;">
+    <div style="display:flex; gap:18px; flex-wrap:wrap; margin-top:8px;">
       <div>Recibido por el trabajador: ________________________________</div>
       <div>Firma de la empresa: _______________________________________</div>
     </div>
