@@ -1,11 +1,11 @@
 # nomina_logic.py
 # Lógica de nóminas: agrupa fichajes/productividad por día, hace top-ups hasta 7h
 # y completa 6 días/semana usando horas de productividad cuando sea posible.
-# Cambios clave:
-#  - Top-up solo en días con fichaje > 0 (no crear días desde 0 en el paso de top-up)
-#  - Mantener máximo 6 días trabajados/semana
-#  - Respetar descanso dominical fuera del 15-feb → 15-jun
-#  - En periodo flexible, si hay que liberar un día, preferir días “sintéticos” (aj>0) y devolver esas horas al pool
+# Reglas clave implementadas:
+#  - Jamás convertir un día con FICHAJE real en descanso.
+#  - Máximo 6 días trabajados/semana. En flexible (15-feb→15-jun) se libera primero un día generado (aj>0).
+#  - Fuera de flexible, el descanso debe ser domingo: solo se libera si ese domingo es generado; si es real, se deja aviso.
+#  - Al generar días, se respeta el máximo 6 en TOTAL (contando domingo), para no llegar a 7.
 
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
@@ -36,13 +36,11 @@ def _dt(s):
     s = str(s).strip()
     if s.endswith('Z'):
         s = s[:-1] + '+00:00'
-    # Intentos comunes
     for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%d', '%d-%m-%Y'):
         try:
             return datetime.strptime(s, fmt)
         except Exception:
             pass
-    # Último recurso: fromisoformat (puede lanzar)
     return datetime.fromisoformat(s)
 
 
@@ -69,12 +67,10 @@ def wb(d: date):
 
 def in_period(d, periods):
     """
-    Devuelve True si la fecha d está dentro de alguno de los periodos flexibles
-    (ignorando el año). Si periods está vacío / None, devuelve siempre False.
+    True si la fecha d está en alguno de los periodos flexibles (ignorando el año).
     """
     if not periods:
         return False
-
     for p in periods:
         try:
             s = _dt(p['start']).date()
@@ -82,20 +78,16 @@ def in_period(d, periods):
         except Exception:
             continue
 
-        # Usamos (mes, día) para ignorar el año
         d_md = (d.month, d.day)
         s_md = (s.month, s.day)
         e_md = (e.month, e.day)
 
-        # Rango normal (ej. 15 feb → 15 jun)
         if s_md <= e_md:
             if s_md <= d_md <= e_md:
                 return True
         else:
-            # Rango que cruza de año (ej. 15 nov → 15 feb)
             if d_md >= s_md or d_md <= e_md:
                 return True
-
     return False
 
 
@@ -106,13 +98,13 @@ def r2(x):
 def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=None,
             flexible_rest_periods=None, enforce_sunday_rest=True):
 
-    # Normalizar flexible_rest_periods a una lista o lista vacía
+    # Periodo flexible por defecto si no se pasa desde fuera
     if not flexible_rest_periods:
-        flexible_rest_periods = []
+        flexible_rest_periods = [{'start': '2000-02-15', 'end': '2000-06-15'}]
     elif isinstance(flexible_rest_periods, dict):
         flexible_rest_periods = [flexible_rest_periods]
     elif not isinstance(flexible_rest_periods, (list, tuple)):
-        flexible_rest_periods = []
+        flexible_rest_periods = [{'start': '2000-02-15', 'end': '2000-06-15'}]
 
     start = _dt(start_date).date()
     end = _dt(end_date).date()
@@ -163,7 +155,8 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
             d: {
                 'fichaje': 0.0,
                 'prod': 0.0,
-                'aj': 0.0,
+                'aj': 0.0,            # horas movidas desde productividad
+                'orig_fichaje': 0.0,  # fichaje real de entrada (antes de ajustes)
                 'nota': [],
                 'dia': DOW[d.weekday()],
                 'fecha': d.isoformat()
@@ -171,11 +164,12 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
             for d in dr(start, end)
         }
 
-        # Cargar fichaje y productividad
+        # Cargar fichaje y productividad (y guardar fichaje original)
         for it in items:
             d = it['fecha']
             if it['categoria'] == 'FICHAJE':
                 days[d]['fichaje'] += it['horas']
+                days[d]['orig_fichaje'] += it['horas']
             else:
                 days[d]['prod'] += it['horas']
 
@@ -223,33 +217,27 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
                     'reason': 'Topup <7h'
                 })
 
-        # 2) Completar 6 días/semana con 7h (si hay productividad suficiente)
+        # 2) Completar hasta 6 días/semana con 7h (si hay productividad suficiente)
         seen = set()
         weeks = []
         for d in sorted(days.keys()):
-            w = wb(d)  # (lunes, domingo)
+            w = wb(d)
             if w not in seen:
                 seen.add(w)
                 weeks.append(w)
 
         for s, e in weeks:
-            # Días de esa semana que están dentro del rango [start, end]
             semana_dias = [d for d in dr(s, e) if d in days]
             if not semana_dias:
                 continue
 
             flex = any(in_period(d, flexible_rest_periods) for d in semana_dias)
 
-            # Días ya trabajados (ignorando domingo fuera de periodo flexible)
-            worked = [
-                d for d in semana_dias
-                if r2(days[d]['fichaje']) > 0
-                and not (enforce_sunday_rest and d.weekday() == 6 and not flex)
-            ]
-            if len(worked) >= 6:
+            worked_total = [d for d in semana_dias if r2(days[d]['fichaje']) > 0]  # cuenta todo (incl. domingo)
+            if len(worked_total) >= 6:
                 continue
 
-            need = 6 - len(worked)
+            need = 6 - len(worked_total)
 
             # Candidatos para generar un día nuevo (no domingo fuera de flexible)
             cand = [
@@ -257,8 +245,6 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
                 if r2(days[d]['fichaje']) == 0
                 and not (enforce_sunday_rest and d.weekday() == 6 and not flex)
             ]
-
-            # Orden estable: por fecha ascendente
             cand.sort()
 
             for d in cand:
@@ -279,8 +265,10 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
                     })
                     need -= 1
 
-        # 3) Cinturón de seguridad: forzar máx. 6 días trabajados/semana
-        #    En flexible, liberar primero días “sintéticos” y devolver su aj al pool (para no perder horas totales).
+        # 3) Cinturón de seguridad: máx. 6 días trabajados/semana
+        #    - Nunca liberar un día con fichaje real (orig_fichaje>0).
+        #    - En flexible: liberar primero días generados (orig_fichaje==0 y aj>0) y devolver su aj al pool.
+        #    - Fuera de flexible: descanso en domingo solo si el domingo es generado; si el domingo es real, dejar aviso.
         seen_cap = set()
         for dref in sorted(days.keys()):
             w = wb(dref)
@@ -296,33 +284,37 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
             worked = [x for x in semana if r2(days[x]['fichaje']) > 0]
 
             if len(worked) <= 6:
-                continue  # ya cumple
+                continue
 
             domingo = next((x for x in semana if x.weekday() == 6), None)
+            # Días generados (trabajados pero sin fichaje real de entrada)
+            generados = [x for x in worked if r2(days[x]['orig_fichaje']) == 0 and r2(days[x]['aj']) > 0]
 
-            if not flex and domingo and r2(days[domingo]['fichaje']) > 0:
-                # Fuera de periodo flexible: el descanso debe ser domingo
-                cand = domingo
-            else:
-                # En periodo flexible: preferir días “sintéticos”
-                sint_full = [x for x in worked if r2(days[x].get('aj', 0.0)) >= r2(days[x]['fichaje'])]
-                sint_algo = [x for x in worked if r2(days[x].get('aj', 0.0)) > 0 and x not in sint_full]
-                if sint_full:
-                    cand = min(sint_full, key=lambda x: (r2(days[x]['aj']), x))
-                elif sint_algo:
-                    cand = min(sint_algo, key=lambda x: (r2(days[x]['aj']), x))
+            cand = None
+            if not flex:
+                # Fuera flexible: intentar liberar domingo SOLO si es generado
+                if domingo and domingo in generados:
+                    cand = domingo
                 else:
-                    cand = min(worked, key=lambda x: (r2(days[x]['fichaje']), x))
+                    # No es posible cumplir descanso en domingo sin tocar un fichaje real
+                    # Dejar aviso y no alterar totales
+                    # (Si hay 7 reales, se mantiene tal cual)
+                    continue
+            else:
+                # En flexible: liberar cualquier generado (prioriza el de menor aj)
+                if generados:
+                    cand = min(generados, key=lambda x: (r2(days[x]['aj']), x))
+                else:
+                    # Todos los trabajados son reales; no podemos liberar sin tocar fichaje real
+                    continue
 
-            # Devolver a pool solo lo que venía de productividad (aj)
-            aj = r2(days[cand].get('aj', 0.0))
-            if aj > 0:
-                pool[cand] = r2(pool.get(cand, 0.0) + aj)
-                days[cand]['aj'] = 0.0
-
-            # Forzar descanso
-            days[cand]['nota'].append('Descanso semanal obligatorio aplicado')
-            days[cand]['fichaje'] = 0.0
+            if cand is not None:
+                aj = r2(days[cand].get('aj', 0.0))
+                if aj > 0:
+                    pool[cand] = r2(pool.get(cand, 0.0) + aj)
+                    days[cand]['aj'] = 0.0
+                days[cand]['nota'].append('Descanso semanal aplicado (día generado liberado)')
+                days[cand]['fichaje'] = 0.0  # Como era un día generado, volvemos a 0
 
         # Preparar salida
         tf = 0.0
@@ -331,8 +323,9 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
         wdays = []
         for d in sorted(days.keys()):
             flex = in_period(d, flexible_rest_periods)
+            # Aviso si domingo con fichaje fuera de flexible (regla incumplible sin tocar datos reales)
             if enforce_sunday_rest and d.weekday() == 6 and not flex and r2(days[d]['fichaje']) > 0:
-                avisos.append(f'Domingo {d.isoformat()} con fichaje fuera de periodo flexible')
+                avisos.append(f'Domingo {d.isoformat()} con fichaje real fuera de periodo flexible (no se puede imponer descanso)')
             prod_final = r2(pool.get(d, 0.0))
             fich_final = r2(days[d]['fichaje'])
             wdays.append({
@@ -348,7 +341,6 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
 
         filas = []
         for d in wdays:
-            # Añadimos TODOS los días, aunque tengan 0 horas
             filas.append(
                 f"<tr>"
                 f"<td>{d['dia']}</td>"
