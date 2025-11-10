@@ -1,6 +1,10 @@
 # nomina_logic.py
 # Lógica de nóminas: agrupa fichajes/productividad por día, hace top-ups hasta 7h
 # y completa 6 días/semana usando horas de productividad cuando sea posible.
+# Cambios clave:
+#  - Top-up solo en días con fichaje > 0 (no crear días desde 0 en el paso de top-up)
+#  - Mantener máximo 6 días trabajados/semana
+#  - Respetar descanso dominical fuera del 15-feb → 15-jun
 
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
@@ -198,13 +202,13 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
 
         transfers = []
 
-        # 1) Subir días < 7h a 7 (no tocar domingo fuera de periodo flexible)
+        # 1) Top-up: subir días con fichaje > 0 y < 7h (no crear días desde 0)
         for d in sorted(days.keys()):
             flex = in_period(d, flexible_rest_periods)
             if enforce_sunday_rest and d.weekday() == 6 and not flex:
                 continue
             fc = r2(days[d]['fichaje'])
-            if fc >= 7.0:
+            if fc >= 7.0 or fc <= 0.0:  # <<--- cambio: solo top-up si ya hay fichaje
                 continue
             need = r2(7.0 - fc)
             got, logs, rem = take(need, prefer=d)
@@ -246,12 +250,15 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
 
             need = 6 - len(worked)
 
-            # Candidatos para generar un día nuevo
+            # Candidatos para generar un día nuevo (no domingo fuera de flexible)
             cand = [
                 d for d in semana_dias
                 if r2(days[d]['fichaje']) == 0
                 and not (enforce_sunday_rest and d.weekday() == 6 and not flex)
             ]
+
+            # Orden estable: por fecha ascendente (opcionalmente podrías priorizar más prod)
+            cand.sort()
 
             for d in cand:
                 if need <= 0:
@@ -270,6 +277,40 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
                         'reason': 'Completar 6 días'
                     })
                     need -= 1
+
+        # 3) Cinturón de seguridad: forzar máx. 6 días trabajados/semana
+        seen_cap = set()
+        for dref in sorted(days.keys()):
+            w = wb(dref)
+            if w in seen_cap:
+                continue
+            seen_cap.add(w)
+            s, e = w
+            semana = [x for x in dr(s, e) if x in days]
+            if not semana:
+                continue
+
+            flex = any(in_period(x, flexible_rest_periods) for x in semana)
+            worked = [x for x in semana if r2(days[x]['fichaje']) > 0]
+
+            # Si hay 7 días trabajados, liberamos 1 según reglas
+            if len(worked) > 6:
+                domingo = next((x for x in semana if x.weekday() == 6), None)
+                if not flex and domingo and r2(days[domingo]['fichaje']) > 0:
+                    cand = domingo
+                else:
+                    # Día con menos horas de fichaje (si empata, el primero cronológico)
+                    cand = min(worked, key=lambda x: (r2(days[x]['fichaje']), x))
+
+                # Devolver a pool el ajuste desde productividad si lo hubo
+                aj = r2(days[cand].get('aj', 0.0))
+                if aj > 0:
+                    pool[cand] = r2(pool.get(cand, 0.0) + aj)
+                    days[cand]['aj'] = 0.0
+
+                # Forzar descanso
+                days[cand]['nota'].append('Descanso semanal obligatorio aplicado')
+                days[cand]['fichaje'] = 0.0
 
         # Preparar salida
         tf = 0.0
@@ -306,7 +347,6 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
                 f"<td>{d['notas']}</td>"
                 f"</tr>"
             )
-
 
         html = f"""
         <div style="font-family:Segoe UI,Arial,sans-serif;font-size:13px">
