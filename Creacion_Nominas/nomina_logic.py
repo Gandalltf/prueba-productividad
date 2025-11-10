@@ -6,6 +6,8 @@
 #  - Máximo 6 días trabajados/semana. En flexible (15-feb→15-jun) se libera primero un día generado (aj>0).
 #  - Fuera de flexible, el descanso debe ser domingo: solo se libera si ese domingo es generado; si es real, se deja aviso.
 #  - Al generar días, se respeta el máximo 6 en TOTAL (contando domingo), para no llegar a 7.
+#  - HTML: Fecha (dd/mm/aaaa) primero, luego Día; Fichaje en negrita, Productividad en gris; domingos con fondo suave;
+#          encabezado de empresa y pie legal añadidos.
 
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
@@ -316,7 +318,7 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
                 days[cand]['nota'].append('Descanso semanal aplicado (día generado liberado)')
                 days[cand]['fichaje'] = 0.0  # Como era un día generado, volvemos a 0
 
-        # Preparar salida
+        # Preparar salida (tabla + HTML)
         tf = 0.0
         tp = 0.0
         avisos = []
@@ -339,44 +341,91 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
             tf += fich_final
             tp += prod_final
 
+        # --- HTML mejorado ---
+        def _fmt_es(fecha_iso: str) -> str:
+            y, m, d = fecha_iso.split("-")
+            return f"{d}/{m}/{y}"
+
         filas = []
+        row_idx = 0
         for d in wdays:
+            fecha_es = _fmt_es(d['fecha'])
+            is_sunday = (d['dia'] == 'Domingo')
+            base_row_style = 'border-top:1px solid #f3f4f6;'
+            zebra = ' background:#fcfcfd;' if (row_idx % 2 == 1) else ''
+            sunday_bg = ' background:#f5f6f7;' if is_sunday else zebra
+
             filas.append(
-                f"<tr>"
-                f"<td>{d['dia']}</td>"
-                f"<td>{d['fecha']}</td>"
-                f"<td>{d['fichaje']}</td>"
-                f"<td>{d['productividad']}</td>"
-                f"<td>{d['ajuste_desde_productividad']}</td>"
-                f"<td>{d['notas']}</td>"
+                f"<tr style=\"{base_row_style}{sunday_bg}\">"
+                f"<td style=\"padding:8px 10px;\">{fecha_es}</td>"
+                f"<td style=\"padding:8px 10px;\">{d['dia']}</td>"
+                f"<td style=\"padding:8px 10px; text-align:right;\"><strong>{d['fichaje']}</strong></td>"
+                f"<td style=\"padding:8px 10px; text-align:right; color:#6b7280;\">{d['productividad']}</td>"
+                f"<td style=\"padding:8px 10px; text-align:right;\">{d['ajuste_desde_productividad']}</td>"
+                f"<td style=\"padding:8px 10px;\">{d['notas']}</td>"
                 f"</tr>"
             )
+            row_idx += 1
 
         html = f"""
-        <div style="font-family:Segoe UI,Arial,sans-serif;font-size:13px">
-          <h3 style="margin:0 0 6px 0">{worker}</h3>
-          <div style="color:#444;margin:0 0 8px 0">Periodo: {MONTH[start.month]} {start.year}</div>
-          <table cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;">
-            <thead>
-              <tr style="border-bottom:1px solid #ddd;text-align:left">
-                <th>Día</th><th>Fecha</th><th>Fichaje (h)</th><th>Productividad (h)</th>
-                <th>Transferido (h)</th><th>Notas</th>
-              </tr>
-            </thead>
-            <tbody>
-              {''.join(filas)}
-            </tbody>
-            <tfoot>
-              <tr style="border-top:1px solid #ddd">
-                <td colspan="2"><b>Totales</b></td>
-                <td><b>{r2(tf)}</b></td>
-                <td><b>{r2(tp)}</b></td>
-                <td></td><td></td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-        """
+<div class="registro-jornadas" style="font-family: Segoe UI, Arial, sans-serif; color:#111; font-size:13px; line-height:1.35;">
+  <!-- Encabezado -->
+  <div style="margin-bottom:14px;">
+    <div style="font-size:18px; font-weight:700; letter-spacing:0.5px;">REGISTRO DE JORNADAS</div>
+    <div style="margin-top:6px; color:#374151;">
+      <div><strong>EMPRESA:</strong> nombre de empresa ejemplo</div>
+      <div><strong>CIF/NIF:</strong> un número ejemplo</div>
+      <div><strong>Centro de trabajo:</strong> un centro de ejemplo</div>
+    </div>
+  </div>
+
+  <!-- Identificación trabajador / periodo -->
+  <div style="margin: 8px 0 10px 0;">
+    <div style="font-weight:600; font-size:15px; margin-bottom:2px;">{worker}</div>
+    <div style="color:#4b5563;">Periodo: {MONTH[start.month]} {start.year}</div>
+  </div>
+
+  <!-- Tabla -->
+  <table cellpadding="0" cellspacing="0" style="border-collapse:collapse; width:100%; border:1px solid #e5e7eb;">
+    <thead>
+      <tr style="background:#f9fafb; border-bottom:1px solid #e5e7eb; text-align:left;">
+        <th style="padding:8px 10px; font-weight:600;">Fecha</th>
+        <th style="padding:8px 10px; font-weight:600;">Día</th>
+        <th style="padding:8px 10px; font-weight:600; text-align:right;">Fichaje (h)</th>
+        <th style="padding:8px 10px; font-weight:600; text-align:right;">Productividad (h)</th>
+        <th style="padding:8px 10px; font-weight:600; text-align:right;">Transferido (h)</th>
+        <th style="padding:8px 10px; font-weight:600;">Notas</th>
+      </tr>
+    </thead>
+    <tbody>
+      {''.join(filas)}
+    </tbody>
+    <tfoot>
+      <tr style="border-top:1px solid #e5e7eb; background:#fafafa;">
+        <td style="padding:10px;" colspan="2"><strong>Totales</strong></td>
+        <td style="padding:10px; text-align:right;"><strong>{r2(tf)}</strong></td>
+        <td style="padding:10px; text-align:right;"><strong>{r2(tp)}</strong></td>
+        <td style="padding:10px;"></td>
+        <td style="padding:10px;"></td>
+      </tr>
+    </tfoot>
+  </table>
+
+  <!-- Pie legal -->
+  <div style="margin-top:12px; color:#4b5563; font-size:12px;">
+    <div style="margin-bottom:6px;">
+      Registro basado en la obligación establecida en el art. 35.5 del Texto Refundido del Estatuto de Trabajadores (RDL 2/2015 de 23 de octubre).
+    </div>
+    <div style="margin-bottom:10px;">
+      <strong>NOTA:</strong> Cuando en las horas normales aparezcan 7 horas, hay que descontar media hora de descanso por comida de las personas trabajadoras.
+    </div>
+    <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:10px;">
+      <div>Recibido por el trabajador: ________________________________</div>
+      <div>Firma de la empresa: _______________________________________</div>
+    </div>
+  </div>
+</div>
+"""
 
         out['workers'].append({
             'trabajador': worker,
