@@ -5,6 +5,7 @@
 #  - Top-up solo en días con fichaje > 0 (no crear días desde 0 en el paso de top-up)
 #  - Mantener máximo 6 días trabajados/semana
 #  - Respetar descanso dominical fuera del 15-feb → 15-jun
+#  - En periodo flexible, si hay que liberar un día, preferir días “sintéticos” (aj>0) y devolver esas horas al pool
 
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
@@ -208,7 +209,7 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
             if enforce_sunday_rest and d.weekday() == 6 and not flex:
                 continue
             fc = r2(days[d]['fichaje'])
-            if fc >= 7.0 or fc <= 0.0:  # <<--- cambio: solo top-up si ya hay fichaje
+            if fc >= 7.0 or fc <= 0.0:
                 continue
             need = r2(7.0 - fc)
             got, logs, rem = take(need, prefer=d)
@@ -257,7 +258,7 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
                 and not (enforce_sunday_rest and d.weekday() == 6 and not flex)
             ]
 
-            # Orden estable: por fecha ascendente (opcionalmente podrías priorizar más prod)
+            # Orden estable: por fecha ascendente
             cand.sort()
 
             for d in cand:
@@ -279,6 +280,7 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
                     need -= 1
 
         # 3) Cinturón de seguridad: forzar máx. 6 días trabajados/semana
+        #    En flexible, liberar primero días “sintéticos” y devolver su aj al pool (para no perder horas totales).
         seen_cap = set()
         for dref in sorted(days.keys()):
             w = wb(dref)
@@ -293,24 +295,34 @@ def process(records, start_date, end_date, tz='Europe/Madrid', selected_worker=N
             flex = any(in_period(x, flexible_rest_periods) for x in semana)
             worked = [x for x in semana if r2(days[x]['fichaje']) > 0]
 
-            # Si hay 7 días trabajados, liberamos 1 según reglas
-            if len(worked) > 6:
-                domingo = next((x for x in semana if x.weekday() == 6), None)
-                if not flex and domingo and r2(days[domingo]['fichaje']) > 0:
-                    cand = domingo
+            if len(worked) <= 6:
+                continue  # ya cumple
+
+            domingo = next((x for x in semana if x.weekday() == 6), None)
+
+            if not flex and domingo and r2(days[domingo]['fichaje']) > 0:
+                # Fuera de periodo flexible: el descanso debe ser domingo
+                cand = domingo
+            else:
+                # En periodo flexible: preferir días “sintéticos”
+                sint_full = [x for x in worked if r2(days[x].get('aj', 0.0)) >= r2(days[x]['fichaje'])]
+                sint_algo = [x for x in worked if r2(days[x].get('aj', 0.0)) > 0 and x not in sint_full]
+                if sint_full:
+                    cand = min(sint_full, key=lambda x: (r2(days[x]['aj']), x))
+                elif sint_algo:
+                    cand = min(sint_algo, key=lambda x: (r2(days[x]['aj']), x))
                 else:
-                    # Día con menos horas de fichaje (si empata, el primero cronológico)
                     cand = min(worked, key=lambda x: (r2(days[x]['fichaje']), x))
 
-                # Devolver a pool el ajuste desde productividad si lo hubo
-                aj = r2(days[cand].get('aj', 0.0))
-                if aj > 0:
-                    pool[cand] = r2(pool.get(cand, 0.0) + aj)
-                    days[cand]['aj'] = 0.0
+            # Devolver a pool solo lo que venía de productividad (aj)
+            aj = r2(days[cand].get('aj', 0.0))
+            if aj > 0:
+                pool[cand] = r2(pool.get(cand, 0.0) + aj)
+                days[cand]['aj'] = 0.0
 
-                # Forzar descanso
-                days[cand]['nota'].append('Descanso semanal obligatorio aplicado')
-                days[cand]['fichaje'] = 0.0
+            # Forzar descanso
+            days[cand]['nota'].append('Descanso semanal obligatorio aplicado')
+            days[cand]['fichaje'] = 0.0
 
         # Preparar salida
         tf = 0.0
